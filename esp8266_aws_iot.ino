@@ -1,8 +1,9 @@
-#include <ESP8266WiFi.h>
+#include <DHT.h>
+#include <DHT_U.h>
 #include <EEPROM.h>
-#include <WiFiClient.h>
 #include <ESP8266WebServer.h>
-
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
 
 using namespace std;
 
@@ -14,59 +15,64 @@ const int mode_unconfigured = 0;
 const int mode_configured = 1;
 int current_mode;
 
-String dht_types[] = {"DHT22", "DHT21"};
+String dht_types[] = {"22", "21"};
 
 ESP8266WebServer server(80);
 
-// initialize with fetchConfiguration()
-String wifi_ssid;
-String wifi_passphrase;
-String dht_type;
-int dht_pin;
-int reset_pin;
+int read_position = 0;
+int write_position = 0;
 
-// addresses in eeprom
-int wifi_ssid_address = 0;
-int wifi_passphrase_address = 60;
-int dht_type_address = 180;
-int dht_pin_address = 182;
-int reset_pin_address = 184; // length: 2
+struct ESP_CONFIG {
+  // position of properties == position in eeprom!
+  String wifi_ssid;
+  String wifi_passphrase;
+  uint8_t dht_type;
+  uint8_t dht_pin;
+  uint8_t reset_pin;
+} esp_config;
 
 const String html_header = "<html dir=\"ltr\" lang=\"en-US\"><head><meta charset=\"utf-8\"><title>ESP8266 kronova.net</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1.0,user-scalable=no,viewport-fit=cover\" /></head><body>";
 const String html_footer = "</body></html>";
 
 const String configuration_home_html = html_header + "<h1>Welcome to ESP8266 WiFi Module</h1><p>Press start to configure your ESP</p><p><a href=\"/configure\">Start</a></p>" + html_footer;
 
-// TODO: Use special char at the end of each string and check that in here
-// Check like: if (current_character == "@") { end_char_position = position }
-// Then at the and check the last position of that char and remove the rest of the string!
-// Important: Need to calculate each address +1 because of that end char!
-String readConfigurationItem(int start_address, int end_address) 
+DHT_Unified *dht;
+
+String readStringFromEeprom() 
 {
-  Serial.print("Read EEPROM from " + String(start_address) + " to " + String(end_address) + "...");
+  Serial.print("Read EEPROM from " + String(read_position)+ "...");
   String value = "";
-  for (int position = start_address; position < end_address; position++) {
+  int position = read_position;
+  int end_position = read_position + 200; // prevents endless loop and limitates string to max 200 chars
+  bool read_error = false;
+  for (position; position < end_position; position++) {
     char current_character = EEPROM.read(position);
-    if (isWhitespace(current_character)) {
-      // too much?
+    if (current_character == '\0') {
+      // end of current string
+      Serial.println("Found end of string!");
+      break;
+    } else if (isWhitespace(current_character)) {
+      Serial.println("Whitespace but no termination of string!");
+      read_error = true;
       break;
     }
     value += current_character;
   }
+  read_position = position + 2;
   Serial.println("ok");
   Serial.println("Fetched value: " + value);
-  return value;
+  return read_error ? "" : value;
 }
 
 bool fetchConfiguration()
 {
-  wifi_ssid = readConfigurationItem(wifi_ssid_address, wifi_passphrase_address - wifi_ssid_address);
-  wifi_passphrase = readConfigurationItem(wifi_passphrase_address, dht_type_address - wifi_passphrase_address);
-  dht_type = readConfigurationItem(dht_type_address, dht_pin_address - dht_type_address);
-  dht_pin = readConfigurationItem(dht_pin_address, reset_pin_address - dht_pin_address).toInt();
-  reset_pin = readConfigurationItem(reset_pin_address, reset_pin_address + 2).toInt();
+  esp_config.wifi_ssid = readStringFromEeprom();
+  esp_config.wifi_passphrase = readStringFromEeprom();
+  esp_config.dht_type = readStringFromEeprom().toInt();
+  esp_config.dht_pin = readStringFromEeprom().toInt();
+  esp_config.reset_pin = readStringFromEeprom().toInt();
 
-  if (wifi_ssid && wifi_passphrase && dht_type && dht_pin && reset_pin) {
+  if (esp_config.wifi_ssid && esp_config.wifi_passphrase && esp_config.dht_type && esp_config.dht_pin && esp_config.reset_pin) {
     return true;
   }
   return false;
@@ -115,7 +121,7 @@ String get_dht_types_html()
   Serial.println(amount_of_types);
 
   for (int i = 0; i < amount_of_types; i++) {
-    html += "<option value=\"" + dht_types[i] + "\">" + dht_types[i] + "</option>";
+    html += "<option value=\"" + dht_types[i] + "\"> DHT" + dht_types[i] + "</option>";
   }
 
   return html;
@@ -141,14 +147,17 @@ void handleConfigurationForm()
   + html_footer);
 }
 
-void writeConfiguration(int address, String value) 
+void writeConfiguration(String value) 
 {
-  Serial.println("Write \"" + value + "\" to address " + address + "...");
+  Serial.println("Write \"" + value + "\" to address " + write_position + "...");
   Serial.print("Writing: ");
-  for (int position = address; position < address + value.length(); position++) {
-    EEPROM.write(position, value[position - address]);
-    Serial.print(value[position - address]);
+  int position = write_position;
+  for (position; position < write_position + value.length(); position++) {
+    EEPROM.write(position, value[position - write_position]);
+    Serial.print(value[position - write_position]);
   }
+  EEPROM.write(++position, '\0');
+  write_position = position + 1;
   Serial.println("...ok");
 }
 
@@ -165,11 +174,11 @@ void handleConfigurationSave()
   String response_html = "<p>Changes saved successfully! Reset the ESP to boot into configured mode!</p>";
 
   if (server.hasArg("wifi_ssid") && server.hasArg("wifi_passphrase") && server.hasArg("dht_type") && server.hasArg("dht_pin") && server.hasArg("reset_pin")) {
-    writeConfiguration(wifi_ssid_address, server.arg("wifi_ssid"));
-    writeConfiguration(wifi_passphrase_address, server.arg("wifi_passphrase"));
-    writeConfiguration(dht_type_address, server.arg("dht_type"));
-    writeConfiguration(dht_pin_address, server.arg("dht_pin"));
-    writeConfiguration(reset_pin_address, server.arg("reset_pin"));
+    writeConfiguration(server.arg("wifi_ssid"));
+    writeConfiguration(server.arg("wifi_passphrase"));
+    writeConfiguration(server.arg("dht_type"));
+    writeConfiguration(server.arg("dht_pin"));
+    writeConfiguration(server.arg("reset_pin"));
   } else {
     response_code = 403;
     response_html = "<p>Your configuration is invalid! Submit your changes using the configuration form!</p>";
@@ -178,11 +187,8 @@ void handleConfigurationSave()
   commitConfiguration();
   server.send(response_code, "text/html", response_html);
 
-  // try a reset using the reset pin
-  int reset_pin = server.arg("reset_pin").toInt();
-  Serial.println("Use reset pin to reset esp...");
-  pinMode(reset_pin, OUTPUT);
-  digitalWrite(reset_pin, HIGH);
+  Serial.println("Restart ESP...");
+  ESP.restart();
 }
 
 
@@ -207,6 +213,30 @@ void setup() {
     Serial.println("HTTP server started");
   } else {
     current_mode = mode_configured;
+    Serial.println("Mode configured...");
+    dht = new DHT_Unified(esp_config.dht_pin, esp_config.dht_type);
+    sensor_t sensor;
+
+    dht->temperature().getSensor(&sensor);
+    Serial.println(F("------------------------------------"));
+    Serial.println(F("Temperature Sensor"));
+    Serial.print  (F("Sensor Type: ")); Serial.println(sensor.name);
+    Serial.print  (F("Driver Ver:  ")); Serial.println(sensor.version);
+    Serial.print  (F("Unique ID:   ")); Serial.println(sensor.sensor_id);
+    Serial.print  (F("Max Value:   ")); Serial.print(sensor.max_value); Serial.println(F("°C"));
+    Serial.print  (F("Min Value:   ")); Serial.print(sensor.min_value); Serial.println(F("°C"));
+    Serial.print  (F("Resolution:  ")); Serial.print(sensor.resolution); Serial.println(F("°C"));
+    Serial.println(F("------------------------------------"));
+
+    dht->humidity().getSensor(&sensor);
+    Serial.println(F("Humidity Sensor"));
+    Serial.print  (F("Sensor Type: ")); Serial.println(sensor.name);
+    Serial.print  (F("Driver Ver:  ")); Serial.println(sensor.version);
+    Serial.print  (F("Unique ID:   ")); Serial.println(sensor.sensor_id);
+    Serial.print  (F("Max Value:   ")); Serial.print(sensor.max_value); Serial.println(F("%"));
+    Serial.print  (F("Min Value:   ")); Serial.print(sensor.min_value); Serial.println(F("%"));
+    Serial.print  (F("Resolution:  ")); Serial.print(sensor.resolution); Serial.println(F("%"));
+    Serial.println(F("------------------------------------"));
   }
 }
 
@@ -214,6 +244,29 @@ void loop() {
   if (current_mode == mode_unconfigured) {
     server.handleClient();
   } else {
+    delay(5000);
 
+    // Get temperature event and print its value.
+    // TODO: Send measured data to AWS IoT
+    sensors_event_t event;
+    dht->temperature().getEvent(&event);
+    if (isnan(event.temperature)) {
+      Serial.println(F("Error reading temperature!"));
+    }
+    else {
+      Serial.print(F("Temperature: "));
+      Serial.print(event.temperature);
+      Serial.println(F("°C"));
+    }
+    // Get humidity event and print its value.
+    dht->humidity().getEvent(&event);
+    if (isnan(event.relative_humidity)) {
+      Serial.println(F("Error reading humidity!"));
+    }
+    else {
+      Serial.print(F("Humidity: "));
+      Serial.print(event.relative_humidity);
+      Serial.println(F("%"));
+    }
   }
 }

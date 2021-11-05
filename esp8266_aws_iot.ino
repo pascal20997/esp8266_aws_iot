@@ -1,5 +1,4 @@
 #include <DHT.h>
-#include <DHT_U.h>
 #include <EEPROM.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
@@ -9,7 +8,7 @@
 
 using namespace std;
 
-#define CONFIG_VERSION "1"
+#define CONFIG_VERSION "0.1"
 
 const String access_point_ssid = "ESP8266 First Configuration";
 const String access_point_passphrase = "kronova.net";
@@ -35,46 +34,52 @@ struct ESP_CONFIG {
   uint8_t dht_pin;
   uint8_t reset_pin;
 
-  char* aws_endpoint;
+  String aws_endpoint;
+  const char* iot_certificate_raw;
   BearSSL::X509List* iot_certificate_pem;
+  const char* iot_private_key_raw;
   BearSSL::PrivateKey* iot_private_key;
-
   String mqtt_publish_topic;
+
+  int measurement_delay;
+  int first_deep_sleep_after_reset;
 } esp_config;
 
 // from https://docs.aws.amazon.com/iot/latest/developerguide/server-authentication.html#server-authentication-certs
-const BearSSL::X509List amazon_root_certificate("-----BEGIN CERTIFICATE-----"
-"MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF"
-"ADA5MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6"
-"b24gUm9vdCBDQSAxMB4XDTE1MDUyNjAwMDAwMFoXDTM4MDExNzAwMDAwMFowOTEL"
-"MAkGA1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJv"
-"b3QgQ0EgMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALJ4gHHKeNXj"
-"ca9HgFB0fW7Y14h29Jlo91ghYPl0hAEvrAIthtOgQ3pOsqTQNroBvo3bSMgHFzZM"
-"9O6II8c+6zf1tRn4SWiw3te5djgdYZ6k/oI2peVKVuRF4fn9tBb6dNqcmzU5L/qw"
-"IFAGbHrQgLKm+a/sRxmPUDgH3KKHOVj4utWp+UhnMJbulHheb4mjUcAwhmahRWa6"
-"VOujw5H5SNz/0egwLX0tdHA114gk957EWW67c4cX8jJGKLhD+rcdqsq08p8kDi1L"
-"93FcXmn/6pUCyziKrlA4b9v7LWIbxcceVOF34GfID5yHI9Y/QCB/IIDEgEw+OyQm"
-"jgSubJrIqg0CAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMC"
-"AYYwHQYDVR0OBBYEFIQYzIU07LwMlJQuCFmcx7IQTgoIMA0GCSqGSIb3DQEBCwUA"
-"A4IBAQCY8jdaQZChGsV2USggNiMOruYou6r4lK5IpDB/G/wkjUu0yKGX9rbxenDI"
-"U5PMCCjjmCXPI6T53iHTfIUJrU6adTrCC2qJeHZERxhlbI1Bjjt/msv0tadQ1wUs"
-"N+gDS63pYaACbvXy8MWy7Vu33PqUXHeeE6V/Uq2V8viTO96LXFvKWlJbYK8U90vv"
-"o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU"
-"5MsI+yMRQ+hDKXJioaldXgjUkK642M4UwtBV8ob2xJNDd2ZhwLnoQdeXeGADbkpy"
-"rqXRfboQnoZsG4q5WTP468SQvvG5"
-"-----END CERTIFICATE-----");
+static const char aws_iot_root_cert[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF
+ADA5MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6
+b24gUm9vdCBDQSAxMB4XDTE1MDUyNjAwMDAwMFoXDTM4MDExNzAwMDAwMFowOTEL
+MAkGA1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJv
+b3QgQ0EgMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALJ4gHHKeNXj
+ca9HgFB0fW7Y14h29Jlo91ghYPl0hAEvrAIthtOgQ3pOsqTQNroBvo3bSMgHFzZM
+9O6II8c+6zf1tRn4SWiw3te5djgdYZ6k/oI2peVKVuRF4fn9tBb6dNqcmzU5L/qw
+IFAGbHrQgLKm+a/sRxmPUDgH3KKHOVj4utWp+UhnMJbulHheb4mjUcAwhmahRWa6
+VOujw5H5SNz/0egwLX0tdHA114gk957EWW67c4cX8jJGKLhD+rcdqsq08p8kDi1L
+93FcXmn/6pUCyziKrlA4b9v7LWIbxcceVOF34GfID5yHI9Y/QCB/IIDEgEw+OyQm
+jgSubJrIqg0CAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMC
+AYYwHQYDVR0OBBYEFIQYzIU07LwMlJQuCFmcx7IQTgoIMA0GCSqGSIb3DQEBCwUA
+A4IBAQCY8jdaQZChGsV2USggNiMOruYou6r4lK5IpDB/G/wkjUu0yKGX9rbxenDI
+U5PMCCjjmCXPI6T53iHTfIUJrU6adTrCC2qJeHZERxhlbI1Bjjt/msv0tadQ1wUs
+N+gDS63pYaACbvXy8MWy7Vu33PqUXHeeE6V/Uq2V8viTO96LXFvKWlJbYK8U90vv
+o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU
+5MsI+yMRQ+hDKXJioaldXgjUkK642M4UwtBV8ob2xJNDd2ZhwLnoQdeXeGADbkpy
+rqXRfboQnoZsG4q5WTP468SQvvG5
+-----END CERTIFICATE-----
+)EOF";
+
+const BearSSL::X509List amazon_root_certificate(aws_iot_root_cert);
 
 const String html_header = "<html dir=\"ltr\" lang=\"en-US\"><head><meta charset=\"utf-8\"><title>ESP8266 kronova.net</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1.0,user-scalable=no,viewport-fit=cover\" /></head><body>";
 const String html_footer = "</body></html>";
 
 String html_page_additional_content = "";
 
-const String configuration_home_html = html_header + "<h1>Welcome to ESP8266 WiFi Module</h1>" + html_page_additional_content + "<p>Press start to configure your ESP</p><p><a href=\"/configure\">Start</a></p>" + html_footer;
+DHT* dht;
 
-DHT_Unified *dht;
-
-WiFiClientSecure *wifi_client;
-PubSubClient *pub_sub_client;
+WiFiClientSecure wifi_client;
+PubSubClient* pub_sub_client;
 
 String readStringFromEeprom() 
 {
@@ -93,7 +98,6 @@ String readStringFromEeprom()
   }
   read_position = position + 2;
   Serial.println("ok");
-  Serial.println("Fetched value: " + value);
   return read_error ? "" : value;
 }
 
@@ -114,18 +118,14 @@ bool fetchConfiguration()
   esp_config.dht_type = readStringFromEeprom().toInt();
   esp_config.dht_pin = readStringFromEeprom().toInt();
   esp_config.reset_pin = readStringFromEeprom().toInt();
-
-  String aws_endpoint = readStringFromEeprom();
-  char* aws_endpoint_char;
-  aws_endpoint.toCharArray(aws_endpoint_char, aws_endpoint.length() + 1);
-  esp_config.aws_endpoint = aws_endpoint_char;
-  
-  const char* iot_certificate_pem(readStringFromEeprom().c_str());
-  esp_config.iot_certificate_pem = new BearSSL::X509List(iot_certificate_pem);
-  const char* iot_private_key(readStringFromEeprom().c_str());
-  esp_config.iot_private_key = new BearSSL::PrivateKey(iot_private_key);
-
+  esp_config.aws_endpoint = readStringFromEeprom();
+  esp_config.iot_certificate_raw = readStringFromEeprom().c_str();
+  esp_config.iot_certificate_pem = new BearSSL::X509List(esp_config.iot_certificate_raw);
+  esp_config.iot_private_key_raw = readStringFromEeprom().c_str();
+  esp_config.iot_private_key = new BearSSL::PrivateKey(esp_config.iot_private_key_raw);
   esp_config.mqtt_publish_topic = readStringFromEeprom();
+  esp_config.measurement_delay = readStringFromEeprom().toInt();
+  esp_config.first_deep_sleep_after_reset = readStringFromEeprom().toInt();
 
   if (
     esp_config.wifi_ssid != ""
@@ -134,9 +134,11 @@ bool fetchConfiguration()
     && esp_config.dht_pin
     && esp_config.reset_pin
     && esp_config.aws_endpoint != ""
-    && iot_certificate_pem != ""
-    && iot_private_key != ""
+    && esp_config.iot_certificate_raw != ""
+    && esp_config.iot_private_key_raw != ""
     && esp_config.mqtt_publish_topic
+    && esp_config.measurement_delay >= 0
+    && esp_config.first_deep_sleep_after_reset > 0
   ) {
     return true;
   }
@@ -195,7 +197,11 @@ String get_dht_types_html()
 
 void handleConfigurationHome()
 {
-  server.send(200, "text/html", configuration_home_html);
+  server.send(
+    200,
+    "text/html",
+    html_header + "<h1>Welcome to ESP8266 WiFi Module</h1>" + html_page_additional_content + "<p>Press start to configure your ESP</p><p><a href=\"/configure\">Start</a></p>" + html_footer
+  );
 }
 
 void handleConfigurationForm()
@@ -212,6 +218,9 @@ void handleConfigurationForm()
   "<fieldset><label for=\"iot-certificate-pem\">AWS IoT Thing Device Certificate</label><textarea name=\"iot_certificate_pem\" rows=\"10\" cols=\"50\" required></textarea></fieldset>"
   "<fieldset><label for=\"iot-private-key\">AWS IoT Thing Private Key File</label><textarea name=\"iot_private_key\" rows=\"10\" cols=\"50\" required></textarea></fieldset>"
   "<fieldset><label for=\"mqtt-publish-topic\">AWS Endpoint</label><input name=\"mqtt_publish_topic\" placeholder=\"$aws/things/myname/shadow\" required/></fieldset>"
+  "<fieldset><label for=\"measurement-delay\">Delay between measurement pushes in seconds</label><input type=\"number\" name=\"measurement_delay\" value=\"180\" required/></fieldset>"
+  // TODO: Add configuration feature!
+  "<fieldset><label for=\"first-deep-sleep-after-reset\">Seconds to wait before going to deep sleep. This delay allows you to configure the ESP by calling the IP via http.</label><input type=\"number\" name=\"measurement_delay\" value=\"30\" required/></fieldset>"
   "<fieldset><label for=\"submit\">Save your Changes to Continue</label><button type=\"submit\">Save changes</submit>"
   "</form>"
   + html_footer);
@@ -253,6 +262,8 @@ void handleConfigurationSave()
     && server.hasArg("iot_certificate_pem")
     && server.hasArg("iot_private_key")
     && server.hasArg("mqtt_publish_topic")
+    && server.hasArg("measurement_delay")
+    && server.hasArg("first_deep_sleep_after_reset")
   ) {
     
     // reset eeprom to prevent bad segements
@@ -270,6 +281,8 @@ void handleConfigurationSave()
     writeConfiguration(server.arg("iot_certificate_pem"));
     writeConfiguration(server.arg("iot_private_key"));
     writeConfiguration(server.arg("mqtt_publish_topic"));
+    writeConfiguration(server.arg("measurement_delay"));
+    writeConfiguration(server.arg("first_deep_sleep_after_reset"));
   } else {
     response_code = 403;
     response_html = "<p>Your configuration is invalid! Submit your changes using the configuration form!</p>";
@@ -285,6 +298,7 @@ void handleConfigurationSave()
 bool setup_wifi()
 {
   Serial.print("Connect to wireless network '" + esp_config.wifi_ssid + "'");
+  WiFi.mode(WIFI_STA);
   WiFi.begin(esp_config.wifi_ssid, esp_config.wifi_passphrase);
   int checks = 0;
   while (checks < 10 && WiFi.status() != WL_CONNECTED) {
@@ -305,30 +319,8 @@ void setup_dht()
     Serial.println(esp_config.dht_pin);
     Serial.print("DHT Type: ");
     Serial.println(esp_config.dht_type);
-    dht = new DHT_Unified(esp_config.dht_pin, esp_config.dht_type);
+    dht = new DHT(esp_config.dht_pin, esp_config.dht_type);
     dht->begin();
-    sensor_t sensor;
-
-    dht->temperature().getSensor(&sensor);
-    Serial.println(F("------------------------------------"));
-    Serial.println(F("Temperature Sensor"));
-    Serial.print  (F("Sensor Type: ")); Serial.println(sensor.name);
-    Serial.print  (F("Driver Ver:  ")); Serial.println(sensor.version);
-    Serial.print  (F("Unique ID:   ")); Serial.println(sensor.sensor_id);
-    Serial.print  (F("Max Value:   ")); Serial.print(sensor.max_value); Serial.println(F("°C"));
-    Serial.print  (F("Min Value:   ")); Serial.print(sensor.min_value); Serial.println(F("°C"));
-    Serial.print  (F("Resolution:  ")); Serial.print(sensor.resolution); Serial.println(F("°C"));
-    Serial.println(F("------------------------------------"));
-
-    dht->humidity().getSensor(&sensor);
-    Serial.println(F("Humidity Sensor"));
-    Serial.print  (F("Sensor Type: ")); Serial.println(sensor.name);
-    Serial.print  (F("Driver Ver:  ")); Serial.println(sensor.version);
-    Serial.print  (F("Unique ID:   ")); Serial.println(sensor.sensor_id);
-    Serial.print  (F("Max Value:   ")); Serial.print(sensor.max_value); Serial.println(F("%"));
-    Serial.print  (F("Min Value:   ")); Serial.print(sensor.min_value); Serial.println(F("%"));
-    Serial.print  (F("Resolution:  ")); Serial.print(sensor.resolution); Serial.println(F("%"));
-    Serial.println(F("------------------------------------"));
 }
 
 // adapted from github.com/HarringayMakerSpace
@@ -347,6 +339,7 @@ void setCurrentTime()
   struct tm timeinfo;
   gmtime_r(&now, &timeinfo);
   Serial.print("Current time: "); Serial.print(asctime(&timeinfo));
+  wifi_client.setX509Time(now);
 }
 
 void messageReceived(char* topic, unsigned char* payload, unsigned int length)
@@ -363,14 +356,24 @@ void messageReceived(char* topic, unsigned char* payload, unsigned int length)
 
 void setup_iot()
 {
-  wifi_client = new WiFiClientSecure();
-  pub_sub_client = new PubSubClient(esp_config.aws_endpoint, 8883, *wifi_client);
-  pub_sub_client->setCallback(messageReceived);
-  wifi_client->setClientRSACert(esp_config.iot_certificate_pem, esp_config.iot_private_key);
-  wifi_client->setTrustAnchors(&amazon_root_certificate);
   setCurrentTime();
-}
+  wifi_client.setClientRSACert(esp_config.iot_certificate_pem, esp_config.iot_private_key);
+  wifi_client.setTrustAnchors(&amazon_root_certificate);
+  Serial.print("Create PubSubClient with domain ");
+  Serial.println(esp_config.aws_endpoint.c_str());
+  pub_sub_client = new PubSubClient(esp_config.aws_endpoint.c_str(), 8883, wifi_client);
+  pub_sub_client->setCallback(messageReceived);
 
+  Serial.print("Connect to ");
+  Serial.print(esp_config.aws_endpoint.c_str());
+  Serial.print("...");
+  if (!wifi_client.connect(esp_config.aws_endpoint.c_str(), 8883)) {
+    Serial.println("FAILED");
+    Serial.println(wifi_client.getLastSSLError());
+    return;
+  }
+  Serial.println("SUCCESS");
+}
 void setup() {
   delay(1000);
   Serial.begin(115200);
@@ -402,7 +405,7 @@ void loop_connect()
 {
     if (!pub_sub_client->connected()) {
       const char* thing_name = "basement_laundry"; // todo: config!!
-      Serial.print("Connect to device");
+      Serial.print("Connect to device ");
       Serial.print(thing_name);
       Serial.print(" ");
       while (!pub_sub_client->connected()) {
@@ -411,6 +414,7 @@ void loop_connect()
           Serial.println("!");
           Serial.print("Can not connect to MQTT. ERROR: ");
           Serial.println(pub_sub_client->state());
+          delay(1000);
         }
         
       }
@@ -420,26 +424,29 @@ void loop_connect()
 
 void loop_publishMeasurement()
 {
-    sensors_event_t event;
-    dht->temperature().getEvent(&event);
-    
-    if (isnan(event.temperature) || isnan(event.relative_humidity)) {
+    float temperature = dht->readTemperature();
+    float humidity = dht->readHumidity();
+
+    if (isnan(temperature) || isnan(humidity)) {
       Serial.println("Could not read values from DHT!");
       return;
     }
 
-    String message = "{\"temperature\":" + String(event.temperature) + ",\"humidity\":" + String(event.relative_humidity) + "}";
+    String message = "{\"temperature\":" + String(temperature) + ",\"humidity\":" + String(humidity) + "}";
     Serial.print("Publish latest data to topic '"); Serial.print(esp_config.mqtt_publish_topic); Serial.println("'...");
+    Serial.print("JSON: "); Serial.println(message);
     pub_sub_client->publish(esp_config.mqtt_publish_topic.c_str(), message.c_str());
 }
 
 void loop()
 {
+  // TODO: Add delay for configuration using esp_config.first_deep_sleep_after_reset
   if (current_mode == mode_unconfigured) {
     server.handleClient();
   } else {
-    delay(5000);
+    delay(500);
     loop_connect();
     loop_publishMeasurement();
+    ESP.deepSleep(esp_config.measurement_delay * 1000000);
   }
 }

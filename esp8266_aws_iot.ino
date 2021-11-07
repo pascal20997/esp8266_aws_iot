@@ -5,10 +5,13 @@
 #include <PubSubClient.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
+#include "Stylesheets.h"
 
 using namespace std;
 
 #define CONFIG_VERSION "0.1"
+#define LOGIN_USERNAME_PASSWORD 0
+#define LOGIN_CREDENTIALS 1
 
 const String access_point_ssid = "ESP8266 First Configuration";
 const String access_point_passphrase = "kronova.net";
@@ -34,12 +37,19 @@ struct ESP_CONFIG {
   uint8_t dht_pin;
   uint8_t reset_pin;
 
-  String aws_endpoint;
-  const char* iot_certificate_raw;
-  BearSSL::X509List* iot_certificate_pem;
-  const char* iot_private_key_raw;
-  BearSSL::PrivateKey* iot_private_key;
-  String mqtt_publish_topic;
+  const char* mqtt_host;
+  int mqtt_port;
+
+  int login_type;
+  // login via username & password
+  const char* mqtt_username;
+  const char* mqtt_password;
+  // login using certificate
+  const char* mqtt_certificate_raw;
+  BearSSL::X509List* mqtt_certificate;
+  const char* mqtt_private_key_raw;
+  BearSSL::PrivateKey* mqtt_private_key;
+  const char* mqtt_publish_topic;
 
   int measurement_delay;
   int first_deep_sleep_after_reset;
@@ -118,12 +128,23 @@ bool fetchConfiguration()
   esp_config.dht_type = readStringFromEeprom().toInt();
   esp_config.dht_pin = readStringFromEeprom().toInt();
   esp_config.reset_pin = readStringFromEeprom().toInt();
-  esp_config.aws_endpoint = readStringFromEeprom();
-  esp_config.iot_certificate_raw = readStringFromEeprom().c_str();
-  esp_config.iot_certificate_pem = new BearSSL::X509List(esp_config.iot_certificate_raw);
-  esp_config.iot_private_key_raw = readStringFromEeprom().c_str();
-  esp_config.iot_private_key = new BearSSL::PrivateKey(esp_config.iot_private_key_raw);
-  esp_config.mqtt_publish_topic = readStringFromEeprom();
+
+  esp_config.login_type = readStringFromEeprom().toInt();
+
+  esp_config.mqtt_host = readStringFromEeprom().c_str();
+  esp_config.mqtt_port = readStringFromEeprom().toInt();
+
+  if (esp_config.login_type == LOGIN_USERNAME_PASSWORD) {
+    esp_config.mqtt_username = readStringFromEeprom().c_str();
+    esp_config.mqtt_password = readStringFromEeprom().c_str();
+  } else {
+    esp_config.mqtt_certificate_raw = readStringFromEeprom().c_str();
+    esp_config.mqtt_certificate = new BearSSL::X509List(esp_config.mqtt_certificate_raw);
+    esp_config.mqtt_private_key_raw = readStringFromEeprom().c_str();
+    esp_config.mqtt_private_key = new BearSSL::PrivateKey(esp_config.mqtt_private_key_raw);
+  }
+
+  esp_config.mqtt_publish_topic = readStringFromEeprom().c_str();
   esp_config.measurement_delay = readStringFromEeprom().toInt();
   esp_config.first_deep_sleep_after_reset = readStringFromEeprom().toInt();
 
@@ -133,10 +154,13 @@ bool fetchConfiguration()
     && esp_config.dht_type
     && esp_config.dht_pin
     && esp_config.reset_pin
-    && esp_config.aws_endpoint != ""
-    && esp_config.iot_certificate_raw != ""
-    && esp_config.iot_private_key_raw != ""
-    && esp_config.mqtt_publish_topic
+    && esp_config.mqtt_host != ""
+    && esp_config.mqtt_port
+    && esp_config.mqtt_username != ""
+    && esp_config.mqtt_password != ""
+    && esp_config.mqtt_certificate_raw != ""
+    && esp_config.mqtt_private_key_raw != ""
+    && esp_config.mqtt_publish_topic != ""
     && esp_config.measurement_delay >= 0
     && esp_config.first_deep_sleep_after_reset > 0
   ) {
@@ -209,15 +233,27 @@ void handleConfigurationForm()
   server.send(200, "text/html", html_header
   + "<h1>Configure your ESP</h1>" + html_page_additional_content +
   "<form method=\"post\" action=\"/save\">"
-  "<fieldset><label for=\"wifi-ssid\">Select your Network<label><select name=\"wifi_ssid\" id=\"wifi-ssid\" required>" + get_wifi_stations_html() + "</select></fieldset>"
-  "<fieldset><label for=\"wifi-passphrase\">Network Passphrase (leave empty if network is unsecured)</label><input type=\"password\" name=\"wifi_passphrase\" id=\"wifi-passphrase\" required /></fieldset>"
-  "<fieldset><label for=\"dht-type\">DHT Type</label><select name=\"dht_type\" id=\"dht-type\" required>" + get_dht_types_html() + "</select></fieldset>"
-  "<fieldset><label for=\"dht-pin\">DHT Pin</label><input name=\"dht_pin\" type=\"number\" min=\"0\" max=\"99\" value=\"5\" required/></fieldset>"
-  "<fieldset><label for=\"reset-pin\">Reset (Wake) Pin</label><input name=\"reset_pin\" type=\"number\" min=\"0\" max=\"99\" value=\"16\" required/></fieldset>"
-  "<fieldset><label for=\"aws-endpoint\">AWS Endpoint</label><input name=\"aws_endpoint\" placeholder=\"<random-stuff>.iot.eu-central-1.amazonaws.com\" required/></fieldset>"
-  "<fieldset><label for=\"iot-certificate-pem\">AWS IoT Thing Device Certificate</label><textarea name=\"iot_certificate_pem\" rows=\"10\" cols=\"50\" required></textarea></fieldset>"
-  "<fieldset><label for=\"iot-private-key\">AWS IoT Thing Private Key File</label><textarea name=\"iot_private_key\" rows=\"10\" cols=\"50\" required></textarea></fieldset>"
-  "<fieldset><label for=\"mqtt-publish-topic\">AWS Endpoint</label><input name=\"mqtt_publish_topic\" placeholder=\"$aws/things/myname/shadow\" required/></fieldset>"
+  "<fieldset><legend>WiFi Credentials</legend>"
+  "<label for=\"wifi-ssid\">Select your Network<label><select name=\"wifi_ssid\" id=\"wifi-ssid\" required>" + get_wifi_stations_html() + "</select>"
+  "<label for=\"wifi-passphrase\">Network Passphrase (leave empty if network is unsecured)</label><input type=\"password\" name=\"wifi_passphrase\" id=\"wifi-passphrase\" required /></fieldset>"
+  "<label for=\"dht-type\">DHT Type</label><select name=\"dht_type\" id=\"dht-type\" required>" + get_dht_types_html() + "</select></fieldset>"
+  "<fieldset><legend>Pin Assignment</legend>"
+  "<label for=\"dht-pin\">DHT Pin</label><input name=\"dht_pin\" type=\"number\" min=\"0\" max=\"99\" value=\"5\" required/></fieldset>"
+  "<label for=\"reset-pin\">Reset (Wake) Pin</label><input name=\"reset_pin\" id=\"reset-pin\" type=\"number\" min=\"0\" max=\"99\" value=\"16\" required/></fieldset>"
+  "<fieldset><legend>MQTT Settings</legend><label for=\"login-type-1\">Login type</label><input type=\"radio\" name=\"login_type\" id=\"login-type-1\" value=\"username_password\"><label for=\"login-type-1\">Username & Password</label><br />"
+  "<input type=\"radio\" name=\"login_type\" id=\"login-type-2\" value=\"certificate\"><label for=\"login-type-2\">Certificate and Key (e.g. AWS IoT)</label><br />"
+  "<label for=\"mqtt-host\">MQTT Hostname</label><input name=\"mqtt_host\" placeholder=\"<random-stuff>.iot.eu-central-1.amazonaws.com\" required/><br />"
+  "<label for=\"mqtt-port\">MQTT Port</label><input name=\"mqtt_port\" type=\"number\" value=\"1883\" required/></fieldset><br />"
+  "<fieldset id=\"username-password\"><legend>Method: Username & Password</legend>"
+  "<label for=\"mqtt-username\">Username</label><input name=\"mqtt_username\" />"
+  "<label for=\"mqtt-password\">Password</label><input type=\"password\" name=\"mqtt_password\" />"
+  /// username - password
+  "</fieldset><fieldset id=\"certificate\"><legend>Method: Certificate</legend>"
+  "<label for=\"mqtt-certificate\">MQTT Certificate (e.g. AWS IoT Thing Device Certificate)</label><textarea name=\"mqtt_certificate\" id=\"mqtt-certificate\" rows=\"10\" cols=\"50\"></textarea>"
+  "<label for=\"mqtt-private-key\">MQTT Private Key (e.g. AWS IoT Thing Private Key File)</label><textarea name=\"mqtt_private_key\" id=\"mqtt-private-key\" rows=\"10\" cols=\"50\"></textarea>"
+  "<label for=\"mqtt-publish-topic\">AWS Endpoint</label><input name=\"mqtt_publish_topic\" placeholder=\"$aws/things/myname/shadow\" required/></fieldset>"
+  // close fieldset after mqtt settings
+  "</fieldset>"
   "<fieldset><label for=\"measurement-delay\">Delay between measurement pushes in seconds</label><input type=\"number\" name=\"measurement_delay\" value=\"180\" required/></fieldset>"
   // TODO: Add configuration feature!
   "<fieldset><label for=\"first-deep-sleep-after-reset\">Seconds to wait before going to deep sleep. This delay allows you to configure the ESP by calling the IP via http.</label><input type=\"number\" name=\"measurement_delay\" value=\"30\" required/></fieldset>"
@@ -258,9 +294,13 @@ void handleConfigurationSave()
     && server.hasArg("dht_type")
     && server.hasArg("dht_pin")
     && server.hasArg("reset_pin")
-    && server.hasArg("aws_endpoint")
-    && server.hasArg("iot_certificate_pem")
-    && server.hasArg("iot_private_key")
+    && server.hasArg("login_type")
+    && server.hasArg("mqtt_host")
+    && server.hasArg("mqtt_port")
+    && server.hasArg("mqtt_username")
+    && server.hasArg("mqtt_password")
+    && server.hasArg("mqtt_certificate")
+    && server.hasArg("mqtt_private_key")
     && server.hasArg("mqtt_publish_topic")
     && server.hasArg("measurement_delay")
     && server.hasArg("first_deep_sleep_after_reset")
@@ -277,10 +317,17 @@ void handleConfigurationSave()
     writeConfiguration(server.arg("dht_type"));
     writeConfiguration(server.arg("dht_pin"));
     writeConfiguration(server.arg("reset_pin"));
-    writeConfiguration(server.arg("aws_endpoint"));
-    writeConfiguration(server.arg("iot_certificate_pem"));
-    writeConfiguration(server.arg("iot_private_key"));
-    writeConfiguration(server.arg("mqtt_publish_topic"));
+    writeConfiguration(server.arg("login_type"));
+    writeConfiguration(server.arg("mqtt_host"));
+    writeConfiguration(server.arg("mqtt_port"));
+    if (server.arg("login_type").toInt() == LOGIN_USERNAME_PASSWORD) {
+      writeConfiguration(server.arg("mqtt_username"));
+      writeConfiguration(server.arg("mqtt_password"));          
+    } else {
+      writeConfiguration(server.arg("mqtt_certificate"));
+      writeConfiguration(server.arg("mqtt_private_key"));
+      writeConfiguration(server.arg("mqtt_publish_topic"));
+    }
     writeConfiguration(server.arg("measurement_delay"));
     writeConfiguration(server.arg("first_deep_sleep_after_reset"));
   } else {
@@ -357,17 +404,17 @@ void messageReceived(char* topic, unsigned char* payload, unsigned int length)
 void setup_iot()
 {
   setCurrentTime();
-  wifi_client.setClientRSACert(esp_config.iot_certificate_pem, esp_config.iot_private_key);
+  wifi_client.setClientRSACert(esp_config.mqtt_certificate, esp_config.mqtt_private_key);
   wifi_client.setTrustAnchors(&amazon_root_certificate);
   Serial.print("Create PubSubClient with domain ");
-  Serial.println(esp_config.aws_endpoint.c_str());
-  pub_sub_client = new PubSubClient(esp_config.aws_endpoint.c_str(), 8883, wifi_client);
+  Serial.println(esp_config.mqtt_host);
+  pub_sub_client = new PubSubClient(esp_config.mqtt_host, 8883, wifi_client);
   pub_sub_client->setCallback(messageReceived);
 
   Serial.print("Connect to ");
-  Serial.print(esp_config.aws_endpoint.c_str());
+  Serial.print(esp_config.mqtt_host);
   Serial.print("...");
-  if (!wifi_client.connect(esp_config.aws_endpoint.c_str(), 8883)) {
+  if (!wifi_client.connect(esp_config.mqtt_host, 8883)) {
     Serial.println("FAILED");
     Serial.println(wifi_client.getLastSSLError());
     return;
@@ -435,7 +482,7 @@ void loop_publishMeasurement()
     String message = "{\"temperature\":" + String(temperature) + ",\"humidity\":" + String(humidity) + "}";
     Serial.print("Publish latest data to topic '"); Serial.print(esp_config.mqtt_publish_topic); Serial.println("'...");
     Serial.print("JSON: "); Serial.println(message);
-    pub_sub_client->publish(esp_config.mqtt_publish_topic.c_str(), message.c_str());
+    pub_sub_client->publish(esp_config.mqtt_publish_topic, message.c_str());
 }
 
 void loop()
